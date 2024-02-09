@@ -1,0 +1,359 @@
+#+startup: indent
+#+options: ':nil *:t -:t ::t <:t H:3 \n:nil ^:t arch:headline author:t
+#+options: broken-links:nil c:nil creator:nil d:(not "LOGBOOK") date:t e:t
+#+options: email:nil f:t inline:t num:t p:nil pri:nil prop:nil stat:t tags:t
+#+options: tasks:t tex:t timestamp:t title:t toc:t todo:t |:t
+#+title: cl-dicom
+#+date: <2024-02-02 Fr>
+#+author: Raffael Golomingi
+#+language: en
+#+select_tags: export
+#+exclude_tags: noexport
+#+creator: Emacs 29.1 (Org mode 9.6.6)
+#+cite_export:
+
+* CL-DICOM  - A DICOM reader for Common Lisp
+
+** Introduction
+
+CL-DICOM is a DICOM reader (and maybe some time in the future writer) for Common
+Lisp. The project is in an alpha state and should be used with caution. Reading
+the pixel data is not yet supported.
+
+You might ask yourself why would someone write a DICOM reader entirely in Common
+Lisp and I can assure you, I do not know.
+
+
+** TODO Usage
+Write how to use CL-DICOM
+
+** TODO Installation
+If this project will make it into quicklisp then Explain how one can install it.
+
+** Ohter todos
+
+*** TODO pixel access
+At the moment the pixel data is read as is. But the image is encoded as jpeg or
+jpeg2000 so one has to convert it somehow.
+
+*** TODO pixel manipulation
+
+Maybe in the future we want to get the image and put it in the right window and
+save it.
+
+*** TODO Write a better value handler
+I'm not happy with it right now.
+
+
+** Author
+
+- Raffael Golomingi
+
+** Copyright
+
+Copyright (c) 2024 Raffael Golomingi
+
+** License
+
+Licensed under the GPLv3 License.
+
+* System definition and development settings
+
+** System definition
+
+#+begin_src lisp :tangle ./cl-dicom.asd
+(defsystem "cl-dicom"
+  :version "0.1.0"
+  :author "Raffael Golomingi"
+  :license "GPLv3"
+  :depends-on ("cl-autowrap"
+               "arrows"
+               "cffi")
+  :components ((:module "src"
+                :components
+                ((:file "main"))))
+  :description "A DICOM reader for Common Lisp"
+  :in-order-to ((test-op (test-op "cl-dicom/tests"))))
+
+(defsystem "cl-dicom/tests"
+  :author "Raffael Golomingi"
+  :license "GPLv3"
+  :depends-on ("cl-dicom"
+               "rove")
+  :components ((:module "tests"
+                :components
+                ((:file "main"))))
+  :description "Test system for cl-dicom"
+  :perform (test-op (op c) (symbol-call :rove :run c)))
+#+end_src
+
+** envrc
+
+I use direnv to develop. Remember to run ~direnv allow~ in a terminal.
+
+#+begin_src bash :tangle ./.envrc
+eval $(guix shell --search-paths)
+#+end_src
+** manifest
+
+This is for developing with guix.  Remember to rund this in the terminal
+-> echo ~/git/cl-dicom >> ~/.config/guix/shell-authorized-directories
+
+#+begin_src lisp :tangle ./manifest.scm
+(specifications->manifest '("sbcl"
+                            "cl-alexandria"
+                            "cl-autowrap"
+                            "cl-arrows"
+                            "cl-cffi"
+                            "cl-rove"
+                            "git"
+                            ))
+#+end_src
+
+* Main
+
+* Package definition
+
+#+begin_src lisp  :tangle ./src/main.lisp :results silent
+(defpackage cl-dicom
+  (:use :cl))
+
+(in-package :cl-dicom)
+#+end_src
+
+
+** Read Raw
+
+We read the dicom files in raw as a vector. With this we can easily parse the
+file.
+
+#+begin_src lisp :tangle ./src/main.lisp :results silent
+(defun read-raw (p)
+  (with-open-file (stream (asdf:system-relative-pathname :cl-dicom p)
+                          :element-type '(unsigned-byte 8))
+    (let ((file-content (make-array (file-length stream)
+                                    :element-type '(unsigned-byte  8))))
+      (read-sequence file-content stream)
+      file-content)))
+#+end_src
+
+**  read 16 bit
+Some numbers are 16 bit encoded, therefore we read two bits from the stream and
+then we generate an interger from them. If set to t we will create them with
+little endian encoding.
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun make-16-bit-number (byte1 byte2 little-endian-p)
+  (if little-endian-p
+      (+ (ash byte2 8) byte1)
+      (+ (ash byte1 8) byte2)))
+#+end_src
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun read-16bit (stream little-endian-p)
+  (let* ((byte1 (read-byte stream))
+         (byte2 (read-byte stream)))
+    (if little-endian-p
+        (+ (* byte2 256) byte1) ; Little-endian: combine byte2 and byte1
+        (+ (* byte1 256) byte2)))) ; Big-endian: combine byte1 and byte2
+#+end_src
+
+** read 32 bit
+
+Some numbers are 32 biten encoded.
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun read-32bit (stream little-endian-p)
+  (let* ((byte1 (read-byte stream))
+         (byte2 (read-byte stream))
+         (byte3 (read-byte stream))
+         (byte4 (read-byte stream)))
+    (if little-endian-p
+        (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
+        (+ (* byte1 16777216) (* byte2 65536) (* byte3 256) byte4))))
+
+(defun make-32-bit-number (byte1 byte2 byte3 byte4 little-endian-p )
+    (if little-endian-p
+        (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
+        (+ (* byte1 16777216) (* byte2 65536) (* byte3 256) byte4)))
+#+end_src
+
+** Read tag
+
+This function extracts the tags from a dicom file. The tags are made up from the
+group and element number. Both ar encoded by two bytes in little endian.
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun read-tag (stream little-endian-p)
+  (let ((group-nr (read-16bit stream little-endian-p))
+        (element-nr (read-16bit stream little-endian-p)))
+     (logior (ash group-nr 16) element-nr)))
+
+
+(defun get-tag (l little-endian-p)
+  (let ((group-nr (apply #'make-16-bit-number (append (subseq l 0 2)
+                                                      '(little-endian-p))))
+        (element-nr (apply #'make-16-bit-number (append (subseq l 2 4)
+                                                        '(little-endian-p)))))
+    (logior (ash group-nr 16) element-nr)))
+#+end_src
+
+** read value representation
+
+This function reads the value representation from the stream. It takes two bytes
+and encodes in ascii-chars
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun get-value-representation (l)
+  (map 'string #'code-char l))
+#+end_src
+
+** Special vr?
+Oh boy, why did they do this? Apparently there are some "special" value
+representations.
+Stated from this source [[http://www.geocities.ws/rajeshstone/dicom.html]]
+If the VR is one of OB’,’OW’,’OF’,’SQ’,’UI’ or ’UN’, the VR is
+having an extra 2 bytes trailing to it. These 2 bytes trailing to VR are empty
+and are not decoded.
+When VR is having these 2 extra empty bytes the VL will occupy 4 bytes rather
+than 2 bytes.
+
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun special-vr-p (vr)
+  (some (lambda (s) (equal vr s)) '("OB" "OW" "OF" "SQ" "UN")))
+#+end_src
+
+** Read value
+To read the value we need to have knowledge of the tag, value representation and
+its length. For example for now this function returns the pixel data as vector.
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun handle-value (tag vr vl c)
+              (cond ((= tag #x7FE00010) (subseq c 12))
+                    ((equal vr "SQ") (parse-data-item (subseq c 12 (+ 12 vl))))
+                    ((equal vr "US") (apply #'make-16-bit-number
+                                            (append (coerce (subseq c 8 (+ 8 vl)) 'list) '(t))))
+
+                    ((equal vr "UL") (apply #'make-32-bit-number
+                                            (append (coerce (subseq c 8 (+ 8 vl)) 'list) '(t))))
+                    ((equal vr "OB") (arrows:as-> (subseq c 12 (+ 12 vl)) s
+                                                 (coerce s 'list)
+                                                 (format nil "~{ #b~4,'0b~}" s)))
+                    ((special-vr-p vr)(arrows:->> (subseq c 12 (+ 12 vl))
+                                                  (map 'string #'code-char)
+                                                  (remove-if (lambda (c) (equal c #\^@)))
+                                                  (string-trim " ")))
+                    (t (arrows:->> (subseq c 8 (+ 8 vl))
+                                   (map 'string #'code-char)
+                                   (remove-if (lambda (c) (equal c #\^@)))
+                                   (string-trim " ")))))
+#+end_src
+
+
+** Get value length
+
+This function gets the length of the value, according to the provided value
+representation.
+
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun get-value-length (l 32-bit-p little-endian-p)
+  (if 32-bit-p
+      (apply #'make-32-bit-number (append l '(little-endian-p)))
+      (apply #'make-16-bit-number (append l '(little-endian-p)))))
+#+end_src
+
+
+** Parse Data Element
+
+A Data Element is made up of at least three entries:
+- Tag
+- Value Length
+- Value Field
+The Value Representation Field is only required if the transfer syntax requires
+it.
+
+You can read more abut it here:
+[[https://dicom.nema.org/medical/dicom/current/output/pdf/part05.pdf]]
+
+
+#+begin_src lisp  :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun parse-data-element (l)
+  (let* ((tag (get-tag (coerce (subseq l 0 4) 'list) t))
+         (vr (get-value-representation (subseq l 4 6)))
+         (vl (if (special-vr-p vr)
+                 (get-value-length (coerce (subseq l 8 12) 'list) t t)
+                 (get-value-length (coerce (subseq l 6 8) 'list) nil t)))
+         (value (handle-value tag vr vl l )))
+    (list :tag tag
+          :vr vr
+          :vl vl
+          :value value)))
+#+end_src
+
+** Parse Data Item
+
+If a value is a sequence of items (VR = SQ), then the value is a sequence of
+zero or more items. Its encoding is defined here
+[[https://dicom.nema.org/medical/dicom/current/output/chtml/part05/sect_7.5.html]].
+
+This function parses the data items. First it skips the item tag because it is
+not unique and of any purpose (I think). Then it recursevly calls the internal
+function parse which calls parse-data-element because the items are data
+elements. Then this function uses the information of the vr and vl to know where
+to continue for the next call.
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun parse-data-item (l)
+  (let ((items '())
+        (data-element-tag (get-tag (coerce (subseq l 0 4) 'list) t))
+        (data-item-length (get-value-length  (coerce (subseq l 4 8) 'list) t nil)))
+    (labels ((parse (c)
+               (unless (or (null c) (= 0 (length c)))
+                 (let* ((item (parse-data-element c))
+                        (item-vr (getf item :vr))
+                        (item-vl (getf item :vl)))
+                   (push item items)
+                   (parse (if (special-vr-p item-vr)
+                              (subseq c (+ 12 item-vl))
+                              (subseq c (+ 8 item-vl))))))))
+      (parse (subseq l 8)))
+   (nreverse items)))
+#+end_src
+
+** Parse DICOM
+
+This function parses a DICOM encoded as a vector. It skips over the 128 bytes of
+empty preamble and the encoded 4 bytes which encode DCIM.
+It then calls the internal function parse which recursevly parses the DICOM.
+This parse function calls parse-data-element and uses the information of tag,
+vr, and vl to know where to continue. It will stop when it reaches the pixel tag.
+
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun parse-dicom (l)
+  (let ((data-items '()))
+    (labels ((parse (c)
+               (unless (or (null c) (= 0 (length c))
+                           (let* ((data-item (parse-data-element c))
+                                  (tag (getf data-item :tag))
+                                  (vr (getf data-item :vr))
+                                  (vl (getf data-item :vl)))
+                             (push data-item data-items)
+                             (parse (cond ((= tag #x7FE00010) '())
+                                          ((special-vr-p vr)(subseq c (+ 12 vl)))
+                                          (t (subseq c (+ 8 vl))))))))))
+      (parse (subseq l 132)))
+    (nreverse data-items)))
+#+end_src
+
+
+** Read DICOM file
+
+This function reads a DICOM file from the given path. It calls parse DICOM and
+then returns the result as plist.
+#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
+(defun read-dicom-file (p)
+  (arrows:->> p
+              (read-raw)
+              (parse-dicom)))
+#+end_src
