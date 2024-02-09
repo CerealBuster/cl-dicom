@@ -16,32 +16,10 @@
       (+ (ash byte2 8) byte1)
       (+ (ash byte1 8) byte2)))
 
-(defun read-16bit (stream little-endian-p)
-  (let* ((byte1 (read-byte stream))
-         (byte2 (read-byte stream)))
-    (if little-endian-p
-        (+ (* byte2 256) byte1) ; Little-endian: combine byte2 and byte1
-        (+ (* byte1 256) byte2)))) ; Big-endian: combine byte1 and byte2
-
-(defun read-32bit (stream little-endian-p)
-  (let* ((byte1 (read-byte stream))
-         (byte2 (read-byte stream))
-         (byte3 (read-byte stream))
-         (byte4 (read-byte stream)))
-    (if little-endian-p
-        (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
-        (+ (* byte1 16777216) (* byte2 65536) (* byte3 256) byte4))))
-
 (defun make-32-bit-number (byte1 byte2 byte3 byte4 little-endian-p )
     (if little-endian-p
         (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
         (+ (* byte1 16777216) (* byte2 65536) (* byte3 256) byte4)))
-
-(defun read-tag (stream little-endian-p)
-  (let ((group-nr (read-16bit stream little-endian-p))
-        (element-nr (read-16bit stream little-endian-p)))
-     (logior (ash group-nr 16) element-nr)))
-
 
 (defun get-tag (l little-endian-p)
   (let ((group-nr (apply #'make-16-bit-number (append (subseq l 0 2)

@@ -138,9 +138,7 @@ file.
 #+end_src
 
 **  read 16 bit
-Some numbers are 16 bit encoded, therefore we read two bits from the stream and
-then we generate an interger from them. If set to t we will create them with
-little endian encoding.
+Some numbers are 16 bit encoded. We create a number from two provided bytes.
 
 #+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
 (defun make-16-bit-number (byte1 byte2 little-endian-p)
@@ -149,28 +147,10 @@ little endian encoding.
       (+ (ash byte1 8) byte2)))
 #+end_src
 
-#+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
-(defun read-16bit (stream little-endian-p)
-  (let* ((byte1 (read-byte stream))
-         (byte2 (read-byte stream)))
-    (if little-endian-p
-        (+ (* byte2 256) byte1) ; Little-endian: combine byte2 and byte1
-        (+ (* byte1 256) byte2)))) ; Big-endian: combine byte1 and byte2
-#+end_src
-
 ** read 32 bit
 
 Some numbers are 32 biten encoded.
 #+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
-(defun read-32bit (stream little-endian-p)
-  (let* ((byte1 (read-byte stream))
-         (byte2 (read-byte stream))
-         (byte3 (read-byte stream))
-         (byte4 (read-byte stream)))
-    (if little-endian-p
-        (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
-        (+ (* byte1 16777216) (* byte2 65536) (* byte3 256) byte4))))
-
 (defun make-32-bit-number (byte1 byte2 byte3 byte4 little-endian-p )
     (if little-endian-p
         (+ (* byte4 16777216) (* byte3 65536) (* byte2 256) byte1)
@@ -183,12 +163,6 @@ This function extracts the tags from a dicom file. The tags are made up from the
 group and element number. Both ar encoded by two bytes in little endian.
 
 #+begin_src lisp :package "cl-dicom" :tangle ./src/main.lisp :results silent
-(defun read-tag (stream little-endian-p)
-  (let ((group-nr (read-16bit stream little-endian-p))
-        (element-nr (read-16bit stream little-endian-p)))
-     (logior (ash group-nr 16) element-nr)))
-
-
 (defun get-tag (l little-endian-p)
   (let ((group-nr (apply #'make-16-bit-number (append (subseq l 0 2)
                                                       '(little-endian-p))))
